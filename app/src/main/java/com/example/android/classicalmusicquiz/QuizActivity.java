@@ -24,20 +24,28 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.support.v4.content.ContextCompat;
+import android.support.v4.media.session.MediaSessionCompat;
+import android.support.v4.media.session.PlaybackStateCompat;
 import android.support.v7.app.AppCompatActivity;
+import android.util.Log;
 import android.view.View;
 import android.widget.Button;
 import android.widget.ImageView;
 import android.widget.Toast;
 
 import com.google.android.exoplayer2.DefaultLoadControl;
+import com.google.android.exoplayer2.ExoPlaybackException;
+import com.google.android.exoplayer2.ExoPlayer;
 import com.google.android.exoplayer2.ExoPlayerFactory;
 import com.google.android.exoplayer2.LoadControl;
 import com.google.android.exoplayer2.SimpleExoPlayer;
+import com.google.android.exoplayer2.Timeline;
 import com.google.android.exoplayer2.extractor.DefaultExtractorsFactory;
 import com.google.android.exoplayer2.source.ExtractorMediaSource;
 import com.google.android.exoplayer2.source.MediaSource;
+import com.google.android.exoplayer2.source.TrackGroupArray;
 import com.google.android.exoplayer2.trackselection.DefaultTrackSelector;
+import com.google.android.exoplayer2.trackselection.TrackSelectionArray;
 import com.google.android.exoplayer2.trackselection.TrackSelector;
 import com.google.android.exoplayer2.ui.SimpleExoPlayerView;
 import com.google.android.exoplayer2.upstream.DefaultDataSourceFactory;
@@ -45,7 +53,11 @@ import com.google.android.exoplayer2.util.Util;
 
 import java.util.ArrayList;
 
-public class QuizActivity extends AppCompatActivity implements View.OnClickListener {
+//The media player is either controlled from the internal client SimpleExoPlayerView or from external clients through the Media Session
+
+public class QuizActivity extends AppCompatActivity implements View.OnClickListener, ExoPlayer.EventListener {
+
+    private static final String TAG = QuizActivity.class.getSimpleName();
 
     private static final int CORRECT_ANSWER_DELAY_MILLIS = 1000;
     private static final String REMAINING_SONGS_KEY = "remaining_songs";
@@ -58,6 +70,9 @@ public class QuizActivity extends AppCompatActivity implements View.OnClickListe
     private Button[] mButtons;
     private SimpleExoPlayer mExoPlayer;
     private SimpleExoPlayerView mPlayerView;
+
+    private MediaSessionCompat mMediaSession;
+    private PlaybackStateCompat.Builder mStateBuilder;
 
 
     @Override
@@ -95,6 +110,9 @@ public class QuizActivity extends AppCompatActivity implements View.OnClickListe
             QuizUtils.endGame(this);
             finish();
         }
+
+        //Initialize the media session
+        initializeMediaSession();
 
         // Initialize the buttons with the composers names.
         mButtons = initializeButtons(mQuestionSampleIDs);
@@ -147,6 +165,9 @@ public class QuizActivity extends AppCompatActivity implements View.OnClickListe
                     this, userAgent), new DefaultExtractorsFactory(), null, null);
             mExoPlayer.prepare(mediaSource);
             mExoPlayer.setPlayWhenReady(true); //Media begins playing once it's ready
+
+            //Set the ExoPlayer.EventListener to this activity
+            mExoPlayer.addListener(this);
         }
     }
 
@@ -202,6 +223,7 @@ public class QuizActivity extends AppCompatActivity implements View.OnClickListe
         handler.postDelayed(new Runnable() {
             @Override
             public void run() {
+                mExoPlayer.stop();
                 Intent nextQuestionIntent = new Intent(QuizActivity.this, QuizActivity.class);
                 nextQuestionIntent.putExtra(REMAINING_SONGS_KEY, mRemainingSampleIDs);
                 finish();
@@ -215,12 +237,14 @@ public class QuizActivity extends AppCompatActivity implements View.OnClickListe
      * Disables the buttons and changes the background colors to show the correct answer.
      */
     private void showCorrectAnswer() {
+
+        //Show the composer portrait when a user selects the correct answer
+        mPlayerView.setDefaultArtwork(Sample.getComposerArtBySampleID(this, mAnswerSampleID));
+
         for (int i = 0; i < mQuestionSampleIDs.size(); i++) {
             int buttonSampleID = mQuestionSampleIDs.get(i);
 
             mButtons[i].setEnabled(false);
-            //Show the composer portrait when a user selects the correct answer
-            mPlayerView.setDefaultArtwork(Sample.getComposerArtBySampleID(this, mAnswerSampleID));
 
             if (buttonSampleID == mAnswerSampleID) {
                 mButtons[i].getBackground().setColorFilter(ContextCompat.getColor
@@ -242,5 +266,86 @@ public class QuizActivity extends AppCompatActivity implements View.OnClickListe
         super.onDestroy();
         //stop and release the player
         releasePlayer();
+        //End the media session when its no longer needed
+        mMediaSession.setActive(false);
     }
+
+    @Override
+    public void onTimelineChanged(Timeline timeline, Object manifest) {
+    }
+
+    @Override
+    public void onTracksChanged(TrackGroupArray trackGroups, TrackSelectionArray trackSelections) {
+    }
+
+    @Override
+    public void onLoadingChanged(boolean isLoading) {
+    }
+
+    @Override
+    public void onPlayerStateChanged(boolean playWhenReady, int playbackState){
+        //When the state is changed from the ui, we make sure that the media session is updated
+        if((playbackState == ExoPlayer.STATE_READY) && playWhenReady){
+            mStateBuilder.setState(PlaybackStateCompat.STATE_PLAYING, mExoPlayer.getCurrentPosition(), 1f);
+        } else if((playbackState == ExoPlayer.STATE_READY)){
+            mStateBuilder.setState(PlaybackStateCompat.STATE_PAUSED, mExoPlayer.getCurrentPosition(), 1f);
+        }
+    }
+
+    @Override
+    public void onPlayerError(ExoPlaybackException error){
+
+    }
+    @Override
+    public void onPositionDiscontinuity() {
+    }
+
+
+    //initialize the Media Session to be enabled with media buttons, transport controls, callbacks, and media controller
+    private void initializeMediaSession(){
+
+        //Create a MediaSessionCompat
+        mMediaSession = new MediaSessionCompat(this, TAG);
+
+        //Set the flags (features that we want to support).   Enables callbacks from MediaButtons and TransportControls
+        mMediaSession.setFlags(
+                MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS | MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS);
+
+        //Set an optional Media Button Receiver component
+        mMediaSession.setMediaButtonReceiver(null);          //Do not let MediaButtons restart the player when the app isn't visible
+
+        //Set the available actions and initial state
+        mStateBuilder = new PlaybackStateCompat.Builder()
+                .setActions(
+                        PlaybackStateCompat.ACTION_PLAY |
+                                PlaybackStateCompat.ACTION_PAUSE |
+                                PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS |
+                                PlaybackStateCompat.ACTION_PLAY_PAUSE);
+        mMediaSession.setPlaybackState(mStateBuilder.build());
+
+        //Set the callbacks
+        mMediaSession.setCallback(new MySessionCallback());
+
+        //Start the Media Session since the activity is active
+        mMediaSession.setActive(true);
+
+
+    }
+
+    private class MySessionCallback extends MediaSessionCompat.Callback {
+        //These are the callbacks that external clients will call when they perform the actions
+        @Override
+        public void onPlay(){
+        }
+
+        @Override
+        public void onPause(){
+        }
+
+        @Override
+        public void onSkipToPrevious(){
+        }
+    }
+
+
 }
